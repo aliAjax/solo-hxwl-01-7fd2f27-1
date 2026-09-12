@@ -12,6 +12,11 @@ function fmt(v: unknown): string {
   return v === undefined || v === "" || v === null ? "—" : String(v);
 }
 
+/** 百分比字段：缺失时只显示破折号，不拼接 % */
+function fmtPct(v: number | ""): string {
+  return v === "" || v === null || v === undefined ? "—" : `${v}%`;
+}
+
 function genderLabel(g: Patient["gender"]): string {
   return g === "male" ? "男" : g === "female" ? "女" : "—";
 }
@@ -50,11 +55,12 @@ export function encounterSummary(e: Encounter, patient: Patient): string {
     lines.push(
       `| 气导 | ${[250, 500, 1000, 2000, 4000, 8000].map((f) => fmt(e.audiogram.air[side][f])).join(" | ")} |`,
     );
+    // 骨导只测 500~4k：250 与 8k 列各补一个破折号，与表头 7 列对齐
     lines.push(
-      `| 骨导 | ${"—"} | ${[500, 1000, 2000, 4000].map((f) => fmt(e.audiogram.bone[side][f])).join(" | ")} | ${"—"} | ${"—"} |`,
+      `| 骨导 | — | ${[500, 1000, 2000, 4000].map((f) => fmt(e.audiogram.bone[side][f])).join(" | ")} | — |`,
     );
     lines.push("");
-    lines.push(`- 言语识别率（WRS）：**${fmt(e.wrs[side] === "" ? undefined : e.wrs[side])}%**`);
+    lines.push(`- 言语识别率（WRS）：**${fmtPct(e.wrs[side])}**`);
     lines.push("");
   }
 
@@ -101,9 +107,9 @@ export function batchSummary(
     lines.push(
       `| ${e.date} | ${p ? p.name : "（已删除档案）"} | ${CATEGORY_LABEL[e.category]} | ${
         fmt(pta(e.audiogram.air.left))
-      } | ${fmt(pta(e.audiogram.air.right))} | ${fmt(e.wrs.left === "" ? undefined : e.wrs.left)}%/${
-        fmt(e.wrs.right === "" ? undefined : e.wrs.right)
-      }% | ${e.aids.map((a) => a.model).join("；") || "—"} | ${e.operatorName || "未署名"} |`,
+      } | ${fmt(pta(e.audiogram.air.right))} | ${fmtPct(e.wrs.left)}/${fmtPct(e.wrs.right)} | ${
+        e.aids.map((a) => a.model).join("；") || "—"
+      } | ${e.operatorName || "未署名"} |`,
     );
   }
   lines.push("");

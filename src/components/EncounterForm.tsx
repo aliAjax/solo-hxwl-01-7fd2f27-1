@@ -146,12 +146,14 @@ export default function EncounterForm({
         date: payload.date,
         category: payload.category as Category,
         audiogram: normalized,
+        wrs: wrsNum,
+        aids: payload.aids,
       },
       store.getState().encounters,
     );
     if (dup) {
       setGlobalError(
-        `重复记录：该患者 ${payload.date} 的「${CATEGORY_LABEL[payload.category as Category]}」已存在相同气导结果的记录（${dup.id}）。`,
+        `重复记录：该患者 ${payload.date} 的「${CATEGORY_LABEL[payload.category as Category]}」已存在气导/骨导/言语识别率/助听器完全相同的记录（${dup.id}）。`,
       );
       return;
     }

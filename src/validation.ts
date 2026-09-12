@@ -172,24 +172,36 @@ export function validateEncounter(
 }
 
 /**
- * 重复提交检测：
- * 同一患者、同一天、同一分类，且气导核心频率阈值完全相同 → 视为重复记录。
+ * 重复记录检测：
+ * 同一患者、同一天、同一分类，且气导、骨导、言语识别率与助听器
+ * （型号/验配耳/增益/调整说明）全部相同 → 判定为重复记录并拦截；
+ * 上述任一项不同（如仅复调了增益、骨导复测有变化）均视为新记录，允许保存。
  */
 export function findDuplicateEncounter(
-  input: Pick<Encounter, "patientId" | "date" | "category" | "audiogram">,
+  input: Pick<Encounter, "patientId" | "date" | "category" | "audiogram" | "wrs" | "aids">,
   encounters: Encounter[],
 ): Encounter | undefined {
-  const signature = (a: Audiogram) =>
-    JSON.stringify([
-      ["left", "right"].map((s) => [500, 1000, 2000, 4000].map((f) => a.air[s as Side][f] ?? "")),
-    ]);
-  const sig = signature(input.audiogram);
+  const sides: Side[] = ["left", "right"];
+  const signature = (x: {
+    audiogram: Audiogram;
+    wrs: Record<Side, number | "">;
+    aids: AidFit[];
+  }) =>
+    JSON.stringify({
+      air: sides.map((s) => AIR_FREQS.map((f) => x.audiogram.air[s][f] ?? null)),
+      bone: sides.map((s) => BONE_FREQS.map((f) => x.audiogram.bone[s][f] ?? null)),
+      wrs: sides.map((s) => x.wrs[s]),
+      aids: x.aids
+        .map((a) => `${a.model.trim()}|${a.side}|${a.gainDb}|${a.note.trim()}`)
+        .sort(),
+    });
+  const sig = signature(input);
   return encounters.find(
     (e) =>
       e.patientId === input.patientId &&
       e.date === input.date &&
       e.category === input.category &&
-      signature(e.audiogram) === sig,
+      signature(e) === sig,
   );
 }
 

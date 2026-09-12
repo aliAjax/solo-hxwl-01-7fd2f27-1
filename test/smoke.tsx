@@ -120,28 +120,67 @@ function unitTests() {
     category: "initial",
     audiogram: { air: validAg, bone: validBg },
     wrs: { left: 80, right: "" },
-    aids: [],
+    aids: validEnc.aids,
     feedback: "",
     operatorName: "x",
     operatorRole: "audiologist",
     createdAt: Date.now(),
   };
-  check(!!findDuplicateEncounter(validEnc, [existing]), "同患者同日同分类同气导结果识别为重复记录");
-  const changed = { ...validEnc, audiogram: { air: { ...validAg, left: ag([35, 41, 44, 48, 52, 58]) }, bone: validBg } };
-  check(!findDuplicateEncounter(changed, [existing]), "气导结果不同不算重复");
+  check(!!findDuplicateEncounter(validEnc, [existing]), "气导/骨导/WRS/助听器全部相同识别为重复记录");
+  const changedAir = {
+    ...validEnc,
+    audiogram: { air: { ...validAg, left: ag([35, 41, 44, 48, 52, 58]) }, bone: validBg },
+  };
+  check(!findDuplicateEncounter(changedAir, [existing]), "仅气导不同不算重复、可保存");
+  const changedBone = {
+    ...validEnc,
+    audiogram: {
+      air: validAg,
+      bone: { left: bg([30, 35, 40, 44]), right: validBg.right },
+    },
+  };
+  check(!findDuplicateEncounter(changedBone, [existing]), "仅骨导不同不算重复、可保存");
+  const changedWrs = { ...validEnc, wrs: { left: 80, right: 66 } };
+  check(!findDuplicateEncounter(changedWrs, [existing]), "仅言语识别率不同不算重复、可保存");
+  const changedAids = {
+    ...validEnc,
+    aids: [{ model: "Test Aid Pro 2", side: "left" as const, gainDb: 5, note: "" }],
+  };
+  check(!findDuplicateEncounter(changedAids, [existing]), "仅助听器（型号/增益/验配耳）不同不算重复、可保存");
 
   const ref = { fingerprint: "abc", at: Date.now() - 100 };
   check(isResubmit(ref, "abc"), "5 秒内相同内容识别为重复提交");
   check(!isResubmit(ref, "abd"), "内容变化不算重复提交");
   check(!isResubmit({ ...ref, at: Date.now() - 6000 }, "abc"), "超过 5 秒不拦截");
 
-  const summary = encounterSummary(existing, dupPatient);
-  check(summary.startsWith("# 听力验配记录摘要"), "单条摘要为 Markdown 标题开头");
-  check(summary.includes("Test Aid Pro") === false, "空助听器记录摘要不残留型号");
-  const withAid = encounterSummary({ ...existing, aids: validEnc.aids }, dupPatient);
-  check(withAid.includes("Test Aid Pro") && withAid.includes("+3") === false && withAid.includes("3 dB"), "摘要含助听器型号与增益");
+  // 导出：骨导表格列与表头对齐（7 列）
+  const withAid = encounterSummary(existing, dupPatient);
+  check(withAid.includes("Test Aid Pro") && withAid.includes("3 dB"), "摘要含助听器型号与增益");
+  const emptyAidsSummary = encounterSummary({ ...existing, aids: [] }, dupPatient);
+  check(!emptyAidsSummary.includes("Test Aid Pro"), "空助听器记录摘要不残留型号");
+  const tableLines = withAid.split("\n").filter((l) => l.startsWith("|"));
+  const colCount = (l: string) => l.split("|").length - 2;
+  check(
+    tableLines.every((l) => colCount(l) === 7),
+    `单条摘要每只耳的测听表均为 7 列（实际：${[...new Set(tableLines.map(colCount))].join(",")}）`,
+  );
+  // 缺失 WRS 不出现 “—%”
+  check(!withAid.includes("—%"), "单条摘要缺失言语识别率显示为 — 而非 —%");
+  check(/言语识别率（WRS）：\*\*80%\*\*/.test(withAid) && /言语识别率（WRS）：\*\*—\*\*/.test(withAid), "单条摘要 WRS 有值带 %、缺失为 —");
+
   const batch = batchSummary([existing], new Map([["P-1", dupPatient]]), "近 14 天 / 全部");
   check(batch.includes("批量摘要") && batch.includes("测试人"), "批量摘要含筛选描述与患者");
+  check(batch.includes("80%/—") && !batch.includes("—%"), "批量摘要缺失一侧 WRS 显示为 — 而非空值加百分号");
+
+  // 两侧 WRS 都缺失的记录
+  const noWrs = encounterSummary({ ...existing, wrs: { left: "", right: "" } }, dupPatient);
+  check(!noWrs.includes("—%"), "双耳 WRS 均缺失时不出现 —%");
+  const noWrsBatch = batchSummary(
+    [{ ...existing, wrs: { left: "", right: "" } }],
+    new Map([["P-1", dupPatient]]),
+    "x",
+  );
+  check(noWrsBatch.includes("—/—"), "批量摘要双耳 WRS 缺失显示 —/—");
 }
 
 // ---------- DOM 集成测试 ----------
@@ -245,24 +284,30 @@ async function integrationTests() {
 
   // 填写完整记录
   const modal = $$(".modal").pop()!;
-  const selects = $$("select", modal);
-  setValue(selects[0], store.getState().patients[0].id); // 患者（最新 = 张三）
+  const thresholdInputs = (m: Element) => {
+    const t = $$(".threshold-table", m);
+    return { air: $$("tbody tr", t[0]).flatMap((tr) => $$("input", tr)), bone: $$("tbody tr", t[1]).flatMap((tr) => $$("input", tr)) };
+  };
+  // variant：仅改动骨导 / WRS / 助听器中的一项，验证"不同记录仍可保存"
+  const fillEncounter = (m: Element, variant: "base" | "bone" | "wrs" | "aid" = "base") => {
+    const sel = $$("select", m);
+    setValue(sel[0], store.getState().patients[0].id); // 患者（最新 = 张三）
+    setValue(sel[1], "initial"); // 分类（助听器验配耳是另一个 select）
+    const { air, bone } = thresholdInputs(m);
+    // 行顺序：右耳、左耳；列顺序：250,500,1k,2k,4k,8k（骨导 500,1k,2k,4k）
+    [40, 42, 45, 50, 55, 60].forEach((v, i) => setValue(air[i], String(v)));
+    [35, 40, 44, 48, 52, 58].forEach((v, i) => setValue(air[6 + i], String(v)));
+    const boneR = variant === "bone" ? [30, 35, 40, 42] : [40, 45, 48, 50];
+    const boneL = variant === "bone" ? [28, 33, 38, 42] : [35, 40, 44, 48];
+    boneR.forEach((v, i) => setValue(bone[i], String(v)));
+    boneL.forEach((v, i) => setValue(bone[4 + i], String(v)));
+    setValue($$(".wrs-row input", m)[0], variant === "wrs" ? "91" : "80");
+    const ai = $$(".aids-list input", m);
+    setValue(ai[0], variant === "aid" ? "Another Aid" : "Test Aid Pro");
+    setValue(ai.find((i) => (i as HTMLInputElement).type === "number")!, variant === "aid" ? "1" : "3");
+  };
   check(store.getState().patients[0].name === "张三", "下拉首位患者为刚新增的张三");
-  setValue(selects[1], "initial"); // 分类（selects[2] 是助听器验配耳）
-  const tables = $$(".threshold-table", modal);
-  const airInputs = (table: Element) => $$("tbody tr", table).flatMap((tr) => $$("input", tr));
-  const air = airInputs(tables[0]);
-  // 行顺序：右耳、左耳；列顺序：250,500,1k,2k,4k,8k
-  [40, 42, 45, 50, 55, 60].forEach((v, i) => setValue(air[i], String(v)));
-  [35, 40, 44, 48, 52, 58].forEach((v, i) => setValue(air[6 + i], String(v)));
-  const bone = airInputs(tables[1]);
-  [40, 45, 48, 50].forEach((v, i) => setValue(bone[i], String(v)));
-  [35, 40, 44, 48].forEach((v, i) => setValue(bone[4 + i], String(v)));
-  const wrsInputs = $$(".wrs-row input", modal);
-  setValue(wrsInputs[0], "80");
-  const aidInputs = $$(".aids-list input", modal);
-  setValue(aidInputs[0], "Test Aid Pro"); // 型号
-  setValue(aidInputs.find((i) => (i as HTMLInputElement).type === "number")!, "3"); // 增益
+  fillEncounter(modal, "base");
   findButton("保存验配记录").click();
   await act(async () => {});
   check($(".toast-ok")?.textContent?.includes("已保存") ?? false, "验配记录保存成功");
@@ -273,30 +318,41 @@ async function integrationTests() {
     "保存的记录含型号/增益/言语识别率",
   );
 
-  // ---- 重复验配记录（同患者同日同分类同结果）----
-  findButton("新增验配记录").click();
-  await act(async () => {});
-  const m2 = $$(".modal").pop()!;
-  const s2 = $$("select", m2);
-  setValue(s2[0], saved.patientId);
-  setValue(s2[1], "initial");
-  const a2 = airInputs($$(".threshold-table", m2)[0]);
-  [40, 42, 45, 50, 55, 60].forEach((v, i) => setValue(a2[i], String(v)));
-  [35, 40, 44, 48, 52, 58].forEach((v, i) => setValue(a2[6 + i], String(v)));
-  const b2 = airInputs($$(".threshold-table", m2)[1]);
-  [40, 45, 48, 50].forEach((v, i) => setValue(b2[i], String(v)));
-  [35, 40, 44, 48].forEach((v, i) => setValue(b2[4 + i], String(v)));
-  setValue($$(".wrs-row input", m2)[0], "80");
-  const ai2 = $$(".aids-list input", m2);
-  setValue(ai2[0], "Another Aid");
-  setValue(ai2.find((i) => (i as HTMLInputElement).type === "number")!, "1");
+  // ---- 完全相同的记录：必须被拦截 ----
+  const openForm = async () => {
+    findButton("新增验配记录").click();
+    await act(async () => {});
+    return $$(".modal").pop()!;
+  };
+  let m2 = await openForm();
+  fillEncounter(m2, "base");
   findButton("保存验配记录").click();
   await act(async () => {});
   alertText = $$(".alert-error")[0]?.textContent ?? "";
-  check(alertText.includes("重复记录"), `重复验配记录给出明确错误（实际：${alertText}）`);
-  check(store.getState().encounters.length === 4, "重复记录未写入 store");
+  check(alertText.includes("重复记录"), `完全相同的验配记录被拦截（实际：${alertText}）`);
+  check(store.getState().encounters.length === 4, "完全相同的记录未写入 store");
   findButton("取消").click();
   await act(async () => {});
+
+  // ---- 同患者同日同分类，但骨导/WRS/助听器不同：均应放行 ----
+  const variants: ["bone" | "wrs" | "aid", string][] = [
+    ["bone", "骨导不同可保存"],
+    ["wrs", "言语识别率不同可保存"],
+    ["aid", "助听器不同可保存"],
+  ];
+  let variantCount = 4;
+  for (const [v, label] of variants) {
+    const mf = await openForm();
+    fillEncounter(mf, v);
+    findButton("保存验配记录").click();
+    await act(async () => {});
+    variantCount += 1;
+    check(
+      store.getState().encounters.length === variantCount && !$$(".alert-error")[0],
+      `${label}（store 记录数 ${variantCount}）`,
+    );
+  }
+
 
   // ---- 筛选：分类 ----
   const rows = () => $$(".record-table tbody tr");
@@ -304,13 +360,13 @@ async function integrationTests() {
     $$(".chip-group button").find((b) => b.textContent?.trim() === label) as HTMLButtonElement;
   categoryChip("初配").click();
   await act(async () => {});
-  check(rows().length === 2, `分类筛选「初配」得到 2 条（实际 ${rows().length}）`);
+  check(rows().length === 5, `分类筛选「初配」得到 5 条（实际 ${rows().length}）`);
   check(rows().every((r) => r.textContent?.includes("初配")), "筛选结果全部为初配");
 
   // 先清除分类筛选
   categoryChip("全部").click();
   await act(async () => {});
-  check(rows().length === 4, "清除分类筛选后恢复 4 条");
+  check(rows().length === 7, "清除分类筛选后恢复 7 条");
 
   // ---- 筛选：记录人角色 ----
   const roleSel = $$(".toolbar select")[0] as HTMLSelectElement;
@@ -328,7 +384,7 @@ async function integrationTests() {
   await act(async () => {});
   check($(".toast-err")?.textContent?.includes("为空") ?? false, "空筛选结果导出给出错误提示");
   setValue(search, "");
-  check(rows().length === 4, "清除搜索后恢复 4 条");
+  check(rows().length === 7, "清除搜索后恢复 7 条");
 
   // ---- 批量导出 ----
   downloads.length = 0;
@@ -337,6 +393,11 @@ async function integrationTests() {
   check(downloads.length === 1 && downloads[0].name.endsWith(".md"), "批量导出触发 .md 文件下载");
   const batchMd = await lastDownloadText();
   check(batchMd.startsWith("# 听力验配记录批量摘要") && batchMd.includes("张三"), "批量摘要内容含标题与新增患者");
+  const batchTableLines = batchMd.split("\n").filter((l) => l.startsWith("|"));
+  check(
+    batchTableLines.every((l) => l.split("|").length - 2 === 8),
+    "批量摘要表格 8 列对齐（日期/患者/分类/PTA×2/WRS/型号/记录人）",
+  );
 
   // ---- 查看详情 ----
   (rows()[0].querySelector(".link-btn") as HTMLButtonElement).click();
@@ -350,13 +411,18 @@ async function integrationTests() {
   await act(async () => {});
   const oneMd = await lastDownloadText();
   check(oneMd.startsWith("# 听力验配记录摘要") && oneMd.includes("言语识别率"), "详情导出为单条 Markdown 摘要");
+  const oneTableLines = oneMd.split("\n").filter((l) => l.startsWith("|"));
+  check(
+    oneTableLines.every((l) => l.split("|").length - 2 === 7),
+    "导出的单条摘要测听表表头/气导/骨导均为 7 列、列对齐",
+  );
   ($$(".modal-close", detail)[0] as HTMLButtonElement).click();
   await act(async () => {});
 
   // 全部记录标签
   findButton("全部记录").click();
   await act(async () => {});
-  check(rows().length === 4, "全部记录页显示 4 条");
+  check(rows().length === 7, "全部记录页显示 7 条");
 
   // 患者档案页
   findButton("患者档案").click();
@@ -376,12 +442,11 @@ async function integrationTests() {
   check(catSelect.disabled && catSelect.value === "followup", "复诊助理的分类锁定为「复诊」");
   const s3 = $$("select", m3);
   setValue(s3[0], saved.patientId);
-  const a3 = airInputs($$(".threshold-table", m3)[0]);
-  [30, 32, 35, 40, 45, 50].forEach((v, i) => setValue(a3[i], String(v)));
-  [25, 30, 34, 38, 42, 48].forEach((v, i) => setValue(a3[6 + i], String(v)));
-  const b3 = airInputs($$(".threshold-table", m3)[1]);
-  [30, 35, 38].forEach((v, i) => setValue(b3[i], String(v)));
-  [25, 30, 34].forEach((v, i) => setValue(b3[4 + i], String(v)));
+  const t3 = thresholdInputs(m3);
+  [30, 32, 35, 40, 45, 50].forEach((v, i) => setValue(t3.air[i], String(v)));
+  [25, 30, 34, 38, 42, 48].forEach((v, i) => setValue(t3.air[6 + i], String(v)));
+  [30, 35, 38].forEach((v, i) => setValue(t3.bone[i], String(v)));
+  [25, 30, 34].forEach((v, i) => setValue(t3.bone[4 + i], String(v)));
   setValue($$(".wrs-row input", m3)[0], "88");
   const ai3 = $$(".aids-list input", m3);
   setValue(ai3[0], "Followup Aid X");
