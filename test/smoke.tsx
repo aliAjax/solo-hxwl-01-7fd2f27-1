@@ -7,7 +7,7 @@ import "./setup-dom";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import App from "../src/App";
-import { store, newPatientId, newEncounterId } from "../src/store";
+import { store, newEncounterId } from "../src/store";
 import {
   validatePatient,
   validateEncounter,
@@ -106,10 +106,10 @@ function unitTests() {
   };
   check(!!validateEncounter(outOfRange, [dupPatient])["air.left.500"], "阈值超出 -10~120 范围报错");
 
-  const wrsBad = { ...validEnc, wrs: { left: 120, right: "" } };
+  const wrsBad = { ...validEnc, wrs: { left: 120, right: "" as "" } };
   check(!!validateEncounter(wrsBad, [dupPatient])["wrs.left"], "言语识别率超过 100 报错");
 
-  const aidBad = { ...validEnc, aids: [{ model: "", side: "bilateral" as const, gainDb: "", note: "" }] };
+  const aidBad = { ...validEnc, aids: [{ model: "", side: "bilateral" as const, gainDb: "" as "", note: "" }] };
   const ab = validateEncounter(aidBad, [dupPatient]);
   check(!!ab["aids.0.model"] && !!ab["aids.0.gainDb"], "助听器型号/增益缺失报错");
 
@@ -183,310 +183,347 @@ function unitTests() {
   check(noWrsBatch.includes("—/—"), "批量摘要双耳 WRS 缺失显示 —/—");
 }
 
-// ---------- DOM 集成测试 ----------
-const $ = (sel: string, root: ParentNode = document) => root.querySelector(sel);
-const $$ = (sel: string, root: ParentNode = document) => Array.from(root.querySelectorAll(sel));
 
-function findButton(text: string): HTMLButtonElement {
-  const btn = $$("button").find((b) => (b.textContent ?? "").replace(/\s+/g, "").includes(text.replace(/\s+/g, "")));
-  if (!btn) throw new Error(`找不到按钮：${text}`);
-  return btn as HTMLButtonElement;
-}
-
-function setValue(el: Element, value: string) {
-  const input = el as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
-  const proto =
-    input instanceof HTMLSelectElement
-      ? HTMLSelectElement.prototype
-      : input instanceof HTMLTextAreaElement
-        ? HTMLTextAreaElement.prototype
-        : HTMLInputElement.prototype;
-  const setter = Object.getOwnPropertyDescriptor(proto, "value")!.set!;
-  act(() => {
-    setter.call(input, value);
-    input.dispatchEvent(new Event("input", { bubbles: true }));
-    input.dispatchEvent(new Event("change", { bubbles: true }));
-  });
-}
+// ---------- DOM 集成测试（每个场景独立隔离） ----------
+const SESSION_KEY = "hxwl-audiology-workbench:session";
 
 const downloads: { name: string; blob: Blob }[] = [];
+let capturedBlob: Blob | undefined;
 
 async function lastDownloadText(): Promise<string> {
   const d = downloads[downloads.length - 1];
   return (await d.blob.text()).replace(/^﻿/, "");
 }
 
-async function renderApp() {
+/** 跟踪测试期间产生的定时器，场景结束时清掉，避免 toast 自动消失在场景外触发 setState */
+function patchTimers() {
+  const nativeSetTimeout = window.setTimeout as (handler: TimerHandler, timeout?: number) => number;
+  const handles = new Set<number>();
+  window.setTimeout = ((handler: TimerHandler, timeout?: number) => {
+    const h = nativeSetTimeout(handler, timeout);
+    handles.add(h);
+    return h;
+  }) as unknown as typeof window.setTimeout;
+  return () => {
+    handles.forEach((h) => clearTimeout(h));
+    handles.clear();
+    window.setTimeout = nativeSetTimeout as unknown as typeof window.setTimeout;
+  };
+}
+
+interface Harness {
+  container: HTMLElement;
+  $: (sel: string, root?: ParentNode) => Element | null;
+  $$: (sel: string, root?: ParentNode) => Element[];
+  button: (text: string) => HTMLButtonElement;
+  set: (el: Element, value: string) => void;
+  thresholdInputs: (modal: Element) => { air: Element[]; bone: Element[] };
+}
+
+async function setupScenario(): Promise<{ harness: Harness; teardown: () => Promise<void> }> {
+  // 数据与会话隔离：重置演示数据、清空登录态
+  store.resetToSeed();
+  window.localStorage.removeItem(SESSION_KEY);
+  downloads.length = 0;
+  capturedBlob = undefined;
+
   const container = document.createElement("div");
+  document.body.innerHTML = "";
   document.body.appendChild(container);
   const root = createRoot(container);
   await act(async () => {
     root.render(<App />);
   });
-  return { root, container };
+
+  const restoreTimers = patchTimers();
+
+  const scoped$ = (sel: string, root: ParentNode = container) => root.querySelector(sel);
+  const scoped$$ = (sel: string, root: ParentNode = container) => Array.from(root.querySelectorAll(sel));
+  const harness: Harness = {
+    container,
+    $: scoped$,
+    $$: scoped$$,
+    button(text) {
+      const btn = scoped$$("button").find((b) =>
+        (b.textContent ?? "").replace(/\s+/g, "").includes(text.replace(/\s+/g, "")),
+      );
+      if (!btn) throw new Error(`找不到按钮：${text}`);
+      return btn as HTMLButtonElement;
+    },
+    set(el, value) {
+      const input = el as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
+      const proto =
+        input instanceof HTMLSelectElement
+          ? HTMLSelectElement.prototype
+          : input instanceof HTMLTextAreaElement
+            ? HTMLTextAreaElement.prototype
+            : HTMLInputElement.prototype;
+      const setter = Object.getOwnPropertyDescriptor(proto, "value")!.set!;
+      act(() => {
+        setter.call(input, value);
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+    },
+    thresholdInputs(m) {
+      const t = scoped$$(".threshold-table", m);
+      return {
+        air: scoped$$("tbody tr", t[0]).flatMap((tr) => Array.from(tr.querySelectorAll("input"))),
+        bone: scoped$$("tbody tr", t[1]).flatMap((tr) => Array.from(tr.querySelectorAll("input"))),
+      };
+    },
+  };
+
+  const teardown = async () => {
+    restoreTimers(); // 先清掉所有挂起的 toast 定时器
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  };
+
+  return { harness, teardown };
 }
 
-async function integrationTests() {
-  store.resetToSeed();
-  const { container } = await renderApp();
-
-  // 记录人姓名
-  setValue($(".name-input")!, "王听力");
-
-  // ---- 新增患者：不完整提交 ----
-  let alertText: string;
-  findButton("新增患者档案").click();
-  await act(async () => {});
-  check(!!$(".modal [role='dialog'], .modal"), "患者档案弹窗打开");
-  findButton("保存档案").click();
-  await act(async () => {});
-  alertText = $(".alert-error")?.textContent ?? "";
-  check(alertText.includes("姓名不能为空"), `空表单提交显示明确全局错误（实际：${alertText}）`);
-  check(($$(".field-error")[0]?.textContent ?? "").includes("姓名不能为空"), "显示「姓名不能为空」字段错误");
-
-  // 姓名太短
-  setValue($$(".field input")[0], "张");
-  findButton("保存档案").click();
-  await act(async () => {});
-  check(($$(".field-error")[0]?.textContent ?? "").includes("至少 2 个字符"), "单字姓名给出长度错误");
-
-  // 填完整后保存
-  setValue($$(".field input")[0], "张三");
-  setValue($(".field select")!, "female");
-  const fieldInputs = $$(".field input");
-  setValue(fieldInputs.find((i) => (i as HTMLInputElement).type === "date")!, "1990-03-03");
-  findButton("保存档案").click();
-  await act(async () => {});
-  check($(".toast-ok")?.textContent?.includes("张三") ?? false, "患者张三保存成功并出现成功提示");
-  check(store.getState().patients.length === 4, "store 中患者数量变为 4");
-
-  // ---- 重复患者 ----
-  findButton("新增患者档案").click();
-  await act(async () => {});
-  setValue($$(".modal .field input")[0], "张三");
-  setValue($(".modal .field select")!, "female");
-  setValue($$(".modal .field input").find((i) => (i as HTMLInputElement).type === "date")!, "1990-03-03");
-  findButton("保存档案").click();
-  await act(async () => {});
-  alertText = $$(".alert-error").pop()?.textContent ?? "";
-  check(alertText.includes("重复"), `重复患者给出明确错误（实际：${alertText}）`);
-  findButton("取消").click();
-  await act(async () => {});
-
-  // ---- 新增验配记录：不完整提交 ----
-  findButton("新增验配记录").click();
-  await act(async () => {});
-  findButton("保存验配记录").click();
-  await act(async () => {});
-  alertText = $$(".alert-error")[0]?.textContent ?? "";
-  check(alertText.includes("记录无法保存") && alertText.includes("必填"), `空验配记录提交显示明确全局错误（实际：${alertText}）`);
-  check($$(".threshold-input.invalid").length > 0, "未填的必填阈值格标红");
-
-  // 填写完整记录
-  const modal = $$(".modal").pop()!;
-  const thresholdInputs = (m: Element) => {
-    const t = $$(".threshold-table", m);
-    return { air: $$("tbody tr", t[0]).flatMap((tr) => $$("input", tr)), bone: $$("tbody tr", t[1]).flatMap((tr) => $$("input", tr)) };
-  };
-  // variant：仅改动骨导 / WRS / 助听器中的一项，验证"不同记录仍可保存"
-  const fillEncounter = (m: Element, variant: "base" | "bone" | "wrs" | "aid" = "base") => {
-    const sel = $$("select", m);
-    setValue(sel[0], store.getState().patients[0].id); // 患者（最新 = 张三）
-    setValue(sel[1], "initial"); // 分类（助听器验配耳是另一个 select）
-    const { air, bone } = thresholdInputs(m);
-    // 行顺序：右耳、左耳；列顺序：250,500,1k,2k,4k,8k（骨导 500,1k,2k,4k）
-    [40, 42, 45, 50, 55, 60].forEach((v, i) => setValue(air[i], String(v)));
-    [35, 40, 44, 48, 52, 58].forEach((v, i) => setValue(air[6 + i], String(v)));
-    const boneR = variant === "bone" ? [30, 35, 40, 42] : [40, 45, 48, 50];
-    const boneL = variant === "bone" ? [28, 33, 38, 42] : [35, 40, 44, 48];
-    boneR.forEach((v, i) => setValue(bone[i], String(v)));
-    boneL.forEach((v, i) => setValue(bone[4 + i], String(v)));
-    setValue($$(".wrs-row input", m)[0], variant === "wrs" ? "91" : "80");
-    const ai = $$(".aids-list input", m);
-    setValue(ai[0], variant === "aid" ? "Another Aid" : "Test Aid Pro");
-    setValue(ai.find((i) => (i as HTMLInputElement).type === "number")!, variant === "aid" ? "1" : "3");
-  };
-  check(store.getState().patients[0].name === "张三", "下拉首位患者为刚新增的张三");
-  fillEncounter(modal, "base");
-  findButton("保存验配记录").click();
-  await act(async () => {});
-  check($(".toast-ok")?.textContent?.includes("已保存") ?? false, "验配记录保存成功");
-  check(store.getState().encounters.length === 4, "store 中验配记录数量变为 4");
-  const saved = store.getState().encounters[0];
-  check(
-    saved.aids[0].model === "Test Aid Pro" && saved.aids[0].gainDb === 3 && saved.wrs.left === 80,
-    "保存的记录含型号/增益/言语识别率",
-  );
-
-  // ---- 完全相同的记录：必须被拦截 ----
-  const openForm = async () => {
-    findButton("新增验配记录").click();
+// ----- 场景 1：患者档案的新增成功、不完整与重复拦截 -----
+async function patientScenario() {
+  const { harness: h, teardown } = await setupScenario();
+  try {
+    // 不完整提交
+    h.button("新增患者档案").click();
     await act(async () => {});
-    return $$(".modal").pop()!;
-  };
-  let m2 = await openForm();
-  fillEncounter(m2, "base");
-  findButton("保存验配记录").click();
-  await act(async () => {});
-  alertText = $$(".alert-error")[0]?.textContent ?? "";
-  check(alertText.includes("重复记录"), `完全相同的验配记录被拦截（实际：${alertText}）`);
-  check(store.getState().encounters.length === 4, "完全相同的记录未写入 store");
-  findButton("取消").click();
-  await act(async () => {});
-
-  // ---- 同患者同日同分类，但骨导/WRS/助听器不同：均应放行 ----
-  const variants: ["bone" | "wrs" | "aid", string][] = [
-    ["bone", "骨导不同可保存"],
-    ["wrs", "言语识别率不同可保存"],
-    ["aid", "助听器不同可保存"],
-  ];
-  let variantCount = 4;
-  for (const [v, label] of variants) {
-    const mf = await openForm();
-    fillEncounter(mf, v);
-    findButton("保存验配记录").click();
+    h.button("保存档案").click();
     await act(async () => {});
-    variantCount += 1;
-    check(
-      store.getState().encounters.length === variantCount && !$$(".alert-error")[0],
-      `${label}（store 记录数 ${variantCount}）`,
-    );
+    let alertText = h.$$(".alert-error").pop()?.textContent ?? "";
+    check(alertText.includes("姓名不能为空"), `空档案提交显示明确错误（实际：${alertText}）`);
+    check((h.$$(".field-error")[0]?.textContent ?? "").includes("姓名不能为空"), "字段级提示「姓名不能为空」");
+
+    // 姓名太短
+    h.set(h.$$(".modal .field input")[0], "张");
+    h.button("保存档案").click();
+    await act(async () => {});
+    check((h.$$(".field-error")[0]?.textContent ?? "").includes("至少 2 个字符"), "单字姓名给出长度错误");
+
+    // 完整档案保存
+    h.set(h.$$(".modal .field input")[0], "张三");
+    h.set(h.$$(".modal .field select")[0], "female");
+    h.set(h.$$(".modal .field input").find((i) => (i as HTMLInputElement).type === "date")!, "1990-03-03");
+    h.button("保存档案").click();
+    await act(async () => {});
+    check(h.container.querySelector(".toast-ok")?.textContent?.includes("张三") ?? false, "患者张三保存成功");
+    check(store.getState().patients.length === 4, "store 患者数量变为 4");
+
+    // 同名同出生日期重复建档
+    h.button("新增患者档案").click();
+    await act(async () => {});
+    h.set(h.$$(".modal .field input")[0], "张三");
+    h.set(h.$$(".modal .field select")[0], "female");
+    h.set(h.$$(".modal .field input").find((i) => (i as HTMLInputElement).type === "date")!, "1990-03-03");
+    h.button("保存档案").click();
+    await act(async () => {});
+    alertText = h.$$(".alert-error").pop()?.textContent ?? "";
+    check(alertText.includes("重复建档"), `重复患者被拦截（实际：${alertText}）`);
+    check(store.getState().patients.length === 4, "重复患者未写入");
+    h.button("取消").click();
+    await act(async () => {});
+  } finally {
+    await teardown();
   }
+}
 
+// ----- 场景 2：验配记录判重（完全相同拦截；骨导/WRS/助听器变化放行） -----
+async function duplicateScenario() {
+  const { harness: h, teardown } = await setupScenario();
+  try {
+    h.set(h.$(".name-input")!, "王听力");
 
-  // ---- 筛选：分类 ----
-  const rows = () => $$(".record-table tbody tr");
-  const categoryChip = (label: string) =>
-    $$(".chip-group button").find((b) => b.textContent?.trim() === label) as HTMLButtonElement;
-  categoryChip("初配").click();
-  await act(async () => {});
-  check(rows().length === 5, `分类筛选「初配」得到 5 条（实际 ${rows().length}）`);
-  check(rows().every((r) => r.textContent?.includes("初配")), "筛选结果全部为初配");
+    // 不完整提交
+    h.button("新增验配记录").click();
+    await act(async () => {});
+    h.button("保存验配记录").click();
+    await act(async () => {});
+    const alertEmpty = h.$$(".alert-error")[0]?.textContent ?? "";
+    check(alertEmpty.includes("记录无法保存"), `空记录提交显示明确错误（实际：${alertEmpty}）`);
+    check(h.$$(".threshold-input.invalid").length > 0, "未填必填阈值格标红");
 
-  // 先清除分类筛选
-  categoryChip("全部").click();
-  await act(async () => {});
-  check(rows().length === 7, "清除分类筛选后恢复 7 条");
+    const fill = (variant: "base" | "bone" | "wrs" | "aid") => {
+      const m = h.$$(".modal").pop()!;
+      const sel = h.$$("select", m);
+      h.set(sel[0], store.getState().patients[0].id);
+      h.set(sel[1], "initial");
+      const { air, bone } = h.thresholdInputs(m);
+      [40, 42, 45, 50, 55, 60].forEach((v, i) => h.set(air[i], String(v)));
+      [35, 40, 44, 48, 52, 58].forEach((v, i) => h.set(air[6 + i], String(v)));
+      const boneR = variant === "bone" ? [30, 35, 40, 42] : [40, 45, 48, 50];
+      const boneL = variant === "bone" ? [28, 33, 38, 42] : [35, 40, 44, 48];
+      boneR.forEach((v, i) => h.set(bone[i], String(v)));
+      boneL.forEach((v, i) => h.set(bone[4 + i], String(v)));
+      h.set(h.$$(".wrs-row input", m)[0], variant === "wrs" ? "91" : "80");
+      const ai = h.$$(".aids-list input", m);
+      h.set(ai[0], variant === "aid" ? "Another Aid" : "Test Aid Pro");
+      h.set(ai.find((i) => (i as HTMLInputElement).type === "number")!, variant === "aid" ? "1" : "3");
+      return m;
+    };
+    const openForm = async () => {
+      h.button("新增验配记录").click();
+      await act(async () => {});
+    };
+    const submit = async () => {
+      h.button("保存验配记录").click();
+      await act(async () => {});
+    };
 
-  // ---- 筛选：记录人角色 ----
-  const roleSel = $$(".toolbar select")[0] as HTMLSelectElement;
-  setValue(roleSel, "followup");
-  check(rows().length === 1 && rows()[0].textContent?.includes("赵兰英"), "角色筛选「复诊助理」得到赵兰英 1 条");
-  setValue(roleSel, "");
+    // 基础记录
+    fill("base");
+    await submit();
+    check(store.getState().encounters.length === 4, "基础验配记录保存成功（4 条）");
+    const saved = store.getState().encounters[0];
+    check(
+      saved.aids[0].model === "Test Aid Pro" && saved.aids[0].gainDb === 3 && saved.wrs.left === 80,
+      "保存内容含型号/增益/WRS",
+    );
 
-  // ---- 搜索 ----
-  const search = $(".filter-search input")!;
-  setValue(search, "Phonak");
-  check(rows().length === 1 && rows()[0].textContent?.includes("刘敏"), "搜索 Phonak 命中刘敏 1 条");
-  // 空结果导出 → 错误提示
-  setValue(search, "不存在的型号zzzz");
-  findButton("导出筛选结果").click();
-  await act(async () => {});
-  check($(".toast-err")?.textContent?.includes("为空") ?? false, "空筛选结果导出给出错误提示");
-  setValue(search, "");
-  check(rows().length === 7, "清除搜索后恢复 7 条");
+    // 完全相同 → 拦截
+    await openForm();
+    fill("base");
+    await submit();
+    const dupAlert = h.$$(".alert-error")[0]?.textContent ?? "";
+    check(dupAlert.includes("重复记录"), `完全相同记录被拦截（实际：${dupAlert}）`);
+    check(store.getState().encounters.length === 4, "完全相同记录未写入");
+    h.button("取消").click();
+    await act(async () => {});
 
-  // ---- 批量导出 ----
-  downloads.length = 0;
-  findButton("导出筛选结果").click();
-  await act(async () => {});
-  check(downloads.length === 1 && downloads[0].name.endsWith(".md"), "批量导出触发 .md 文件下载");
-  const batchMd = await lastDownloadText();
-  check(batchMd.startsWith("# 听力验配记录批量摘要") && batchMd.includes("张三"), "批量摘要内容含标题与新增患者");
-  const batchTableLines = batchMd.split("\n").filter((l) => l.startsWith("|"));
-  check(
-    batchTableLines.every((l) => l.split("|").length - 2 === 8),
-    "批量摘要表格 8 列对齐（日期/患者/分类/PTA×2/WRS/型号/记录人）",
-  );
+    // 三种变体 → 放行
+    const variants: ["bone" | "wrs" | "aid", string][] = [
+      ["bone", "骨导变化可保存"],
+      ["wrs", "言语识别率变化可保存"],
+      ["aid", "助听器变化可保存"],
+    ];
+    let count = 4;
+    for (const [v, label] of variants) {
+      await openForm();
+      fill(v);
+      await submit();
+      count += 1;
+      check(store.getState().encounters.length === count && !h.$$(".alert-error")[0], label);
+    }
+  } finally {
+    await teardown();
+  }
+}
 
-  // ---- 查看详情 ----
-  (rows()[0].querySelector(".link-btn") as HTMLButtonElement).click();
-  await act(async () => {});
-  const detail = $$(".modal").pop()!;
-  check(!!$(".audiogram", detail), "详情显示听力图 SVG");
-  check(($$(".metric-box", detail).length) === 4, "详情显示 PTA 与 WRS 四个指标");
-  check($$(".aid-card", detail).length >= 1, "详情显示助听器与增益卡片");
-  downloads.length = 0;
-  ($$("button", detail).find((b) => b.textContent?.includes("导出 Markdown 摘要")) as HTMLButtonElement).click();
-  await act(async () => {});
-  const oneMd = await lastDownloadText();
-  check(oneMd.startsWith("# 听力验配记录摘要") && oneMd.includes("言语识别率"), "详情导出为单条 Markdown 摘要");
-  const oneTableLines = oneMd.split("\n").filter((l) => l.startsWith("|"));
-  check(
-    oneTableLines.every((l) => l.split("|").length - 2 === 7),
-    "导出的单条摘要测听表表头/气导/骨导均为 7 列、列对齐",
-  );
-  ($$(".modal-close", detail)[0] as HTMLButtonElement).click();
-  await act(async () => {});
+// ----- 场景 3：筛选、查看与导出（列对齐、缺失值） -----
+async function filterExportScenario() {
+  const { harness: h, teardown } = await setupScenario();
+  try {
+    const rows = () => h.$$(".record-table tbody tr");
+    const chip = (label: string) =>
+      h.$$(".chip-group button").find((b) => b.textContent?.trim() === label) as HTMLButtonElement;
 
-  // 全部记录标签
-  findButton("全部记录").click();
-  await act(async () => {});
-  check(rows().length === 7, "全部记录页显示 7 条");
+    check(rows().length === 3, `近期记录默认 3 条（实际 ${rows().length}）`);
+    chip("初配").click();
+    await act(async () => {});
+    check(rows().length === 1 && rows()[0].textContent?.includes("刘敏"), "分类筛选「初配」命中刘敏");
+    chip("全部").click();
+    await act(async () => {});
 
-  // 患者档案页
-  findButton("患者档案").click();
-  await act(async () => {});
-  check($$(".patient-card").length === 4, "患者档案页显示 4 张卡片");
+    h.set(h.$$(".toolbar select")[0], "followup");
+    check(rows().length === 1 && rows()[0].textContent?.includes("赵兰英"), "角色筛选「复诊助理」命中赵兰英");
+    h.set(h.$$(".toolbar select")[0], "");
 
-  // ---- 切换复诊助理：权限与录入 ----
-  findButton("近期记录").click();
-  await act(async () => {});
-  ( $$(".role-switch button")[1] as HTMLButtonElement).click();
-  await act(async () => {});
-  check(!$$("button").some((b) => b.textContent?.includes("新增患者档案")), "复诊助理视图不显示「新增患者档案」");
-  findButton("新增验配记录").click();
-  await act(async () => {});
-  const m3 = $$(".modal").pop()!;
-  const catSelect = $$("select", m3)[1] as HTMLSelectElement;
-  check(catSelect.disabled && catSelect.value === "followup", "复诊助理的分类锁定为「复诊」");
-  const s3 = $$("select", m3);
-  setValue(s3[0], saved.patientId);
-  const t3 = thresholdInputs(m3);
-  [30, 32, 35, 40, 45, 50].forEach((v, i) => setValue(t3.air[i], String(v)));
-  [25, 30, 34, 38, 42, 48].forEach((v, i) => setValue(t3.air[6 + i], String(v)));
-  [30, 35, 38].forEach((v, i) => setValue(t3.bone[i], String(v)));
-  [25, 30, 34].forEach((v, i) => setValue(t3.bone[4 + i], String(v)));
-  setValue($$(".wrs-row input", m3)[0], "88");
-  const ai3 = $$(".aids-list input", m3);
-  setValue(ai3[0], "Followup Aid X");
-  setValue(ai3.find((i) => (i as HTMLInputElement).type === "number")!, "-1");
-  findButton("保存验配记录").click();
-  await act(async () => {});
-  const followupRec = store.getState().encounters[0];
-  check(
-    followupRec.operatorRole === ("followup" as Role) && followupRec.category === "followup",
-    "复诊助理保存的记录标记为复诊角色与复诊分类",
-  );
-  check(
-    followupRec.aids[0].model === "Followup Aid X" && followupRec.aids[0].gainDb === -1,
-    "复诊记录保存了型号与负增益调整",
-  );
+    h.set(h.$(".filter-search input")!, "Phonak");
+    check(rows().length === 1, "搜索 Phonak 命中 1 条");
+    h.set(h.$(".filter-search input")!, "不存在的型号zzzz");
+    h.button("导出筛选结果").click();
+    await act(async () => {});
+    check(h.$(".toast-err")?.textContent?.includes("为空") ?? false, "空结果导出给出错误提示");
+    h.set(h.$(".filter-search input")!, "");
 
-  // 未填记录人姓名时拦截
-  ($$(".role-switch button")[0] as HTMLButtonElement).click();
-  await act(async () => {});
-  setValue($(".name-input")!, "");
-  findButton("新增验配记录").click();
-  await act(async () => {});
-  check($(".toast-err")?.textContent?.includes("记录人姓名") ?? false, "未填记录人时新增被拦截并提示");
+    // 批量导出：8 列对齐
+    h.button("导出筛选结果").click();
+    await act(async () => {});
+    check(downloads.length === 1 && downloads[0].name.endsWith(".md"), "批量导出触发 .md 下载");
+    const batchMd = await lastDownloadText();
+    const batchLines = batchMd.split("\n").filter((l) => l.startsWith("|"));
+    check(batchLines.every((l) => l.split("|").length - 2 === 8), "批量摘要表格全部 8 列对齐");
+    check(batchMd.includes("96%/84%"), "批量摘要正常显示双耳 WRS 百分比");
 
-  console.log(`\n集成环境渲染容器节点数：${container.childNodes.length}`);
+    // 详情 + 单条导出：7 列对齐
+    (rows()[0].querySelector(".link-btn") as HTMLButtonElement).click();
+    await act(async () => {});
+    const detail = h.$$(".modal").pop()!;
+    check(!!h.$(".audiogram", detail), "详情显示听力图");
+    check(h.$$(".metric-box", detail).length === 4, "详情显示 4 个指标");
+    (h.$$("button", detail).find((b) => b.textContent?.includes("导出 Markdown 摘要")) as HTMLButtonElement).click();
+    await act(async () => {});
+    const oneMd = await lastDownloadText();
+    const oneLines = oneMd.split("\n").filter((l) => l.startsWith("|"));
+    check(oneLines.every((l) => l.split("|").length - 2 === 7), "单条摘要测听表全部 7 列对齐（含骨导行）");
+    check(oneMd.includes("言语识别率"), "单条摘要含言语识别率段落");
+  } finally {
+    await teardown();
+  }
+}
+
+// ----- 场景 4：复诊助理权限与未署名拦截 -----
+async function roleScenario() {
+  const { harness: h, teardown } = await setupScenario();
+  try {
+    // 未填记录人姓名 → 拦截
+    h.button("新增验配记录").click();
+    await act(async () => {});
+    check(h.$(".toast-err")?.textContent?.includes("记录人姓名") ?? false, "未署名时新增被拦截");
+
+    h.set(h.$(".name-input")!, "李助理");
+    // 切换复诊助理
+    (h.$$(".role-switch button")[1] as HTMLButtonElement).click();
+    await act(async () => {});
+    check(
+      !h.$$("button").some((b) => b.textContent?.includes("新增患者档案")),
+      "复诊助理视图无「新增患者档案」入口",
+    );
+    h.button("新增验配记录").click();
+    await act(async () => {});
+    const m = h.$$(".modal").pop()!;
+    const cat = h.$$("select", m)[1] as HTMLSelectElement;
+    check(cat.disabled && cat.value === "followup", "复诊助理分类锁定为「复诊」");
+
+    const sel = h.$$("select", m);
+    h.set(sel[0], store.getState().patients[2].id);
+    const { air, bone } = h.thresholdInputs(m);
+    [30, 32, 35, 40, 45, 50].forEach((v, i) => h.set(air[i], String(v)));
+    [25, 30, 34, 38, 42, 48].forEach((v, i) => h.set(air[6 + i], String(v)));
+    [30, 35, 38].forEach((v, i) => h.set(bone[i], String(v)));
+    [25, 30, 34].forEach((v, i) => h.set(bone[4 + i], String(v)));
+    h.set(h.$$(".wrs-row input", m)[0], "88");
+    const ai = h.$$(".aids-list input", m);
+    h.set(ai[0], "Followup Aid X");
+    h.set(ai.find((i) => (i as HTMLInputElement).type === "number")!, "-1");
+    h.button("保存验配记录").click();
+    await act(async () => {});
+    const rec = store.getState().encounters[0];
+    check(
+      rec.operatorRole === ("followup" as Role) && rec.category === "followup",
+      "复诊记录标记为复诊角色与复诊分类",
+    );
+    check(rec.aids[0].gainDb === -1, "复诊记录保存负增益调整");
+  } finally {
+    await teardown();
+  }
 }
 
 async function main() {
-  // 捕获应用的“下载”：拦截 <a>.click 并记录 Blob
+  // 捕获“下载”：记录 Blob，不触发真实导航
   window.HTMLAnchorElement.prototype.click = function (this: HTMLAnchorElement) {
-    downloads.push({ name: this.download, blob: capturedBlob! });
+    if (capturedBlob) downloads.push({ name: this.download, blob: capturedBlob });
   };
-  let capturedBlob: Blob | undefined;
   window.URL.createObjectURL = ((blob: Blob) => {
     capturedBlob = blob;
     return "blob:mock";
   }) as typeof window.URL.createObjectURL;
   window.URL.revokeObjectURL = () => {};
 
-  // 让所有 DOM click 在 React act 内执行，同步刷新状态（下载锚点已在上面单独接管）
+  // 所有 DOM click 在 act 内执行，同步刷新 React 状态
   const nativeClick = window.HTMLElement.prototype.click;
   window.HTMLElement.prototype.click = function (this: HTMLElement) {
     act(() => {
@@ -494,12 +531,33 @@ async function main() {
     });
   };
 
+  // 收集意外的 React act 警告，任一出现即判失败
+  const actWarnings: string[] = [];
+  const origConsoleError = console.error;
+  console.error = (...args: unknown[]) => {
+    const msg = args.map(String).join(" ");
+    if (msg.includes("not wrapped in act")) actWarnings.push(msg);
+    origConsoleError.apply(console, args);
+  };
+
   console.log("== 纯逻辑单元测试 ==");
   unitTests();
-  console.log("\n== jsdom 集成测试 ==");
-  await integrationTests();
-  // 等待 Blob.text() Promise 落盘
-  await new Promise((r) => setTimeout(r, 50));
+
+  console.log("\n== jsdom 集成测试（场景隔离） ==");
+  const scenarios: [string, () => Promise<void>][] = [
+    ["患者档案", patientScenario],
+    ["验配判重", duplicateScenario],
+    ["筛选与导出", filterExportScenario],
+    ["角色权限", roleScenario],
+  ];
+  for (const [name, fn] of scenarios) {
+    console.log(`\n-- 场景：${name} --`);
+    await fn();
+    await new Promise((r) => setTimeout(r, 0));
+  }
+
+  console.error = origConsoleError;
+  check(actWarnings.length === 0, `无状态更新脱离 act 的警告（实际 ${actWarnings.length} 条）`);
   console.log(`\n全部通过：${passed} 个断言`);
 }
 

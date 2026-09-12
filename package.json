@@ -3,8 +3,9 @@
     "dev": "vite --host 0.0.0.0 --port 5101",
     "build": "vite build",
     "preview": "vite preview --host 0.0.0.0 --port 5101",
-    "typecheck": "tsc --noEmit",
-    "test": "tsx test/smoke.tsx"
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json",
+    "test": "tsx test/smoke.tsx",
+    "test:browser": "tsx test/browser.e2e.ts"
   },
   "dependencies": {
     "@vitejs/plugin-react": "^5.0.0",
@@ -14,9 +15,12 @@
     "vite": "^7.0.0"
   },
   "devDependencies": {
+    "@types/jsdom": "^30.0.0",
+    "@types/node": "^22.20.2",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "jsdom": "^29.1.1",
+    "playwright": "^1.63.0",
     "tsx": "^4.23.13"
   }
 }

@@ -20,11 +20,17 @@ npm run dev
 其他命令：
 
 ```bash
-npm run build        # 生产构建到 dist/
-npm run preview      # 本地预览生产构建（同为 5101 端口）
-npm run typecheck    # TypeScript 类型检查
-npm test             # jsdom 端到端冒烟测试（55 个断言）
+npm run build          # 生产构建到 dist/
+npm run preview        # 本地预览生产构建（同为 5101 端口）
+npm run typecheck      # TypeScript 类型检查
+npm test               # jsdom 场景隔离测试（62 个断言，0 个 act 警告）
+npm run test:browser   # Playwright 真实 Chromium 端到端验证（自动起 dev server，17 个断言）
 ```
+
+真实浏览器测试说明：`test:browser` 使用 Playwright，会自动在 5199 端口拉起 Vite。
+常规环境先执行一次 `npx playwright install chromium` 即可；本机（无 root 的 arm64 容器）
+则把 Chromium 与依赖库装在用户目录，测试脚本会自动探测 `~/.cache/ms-playwright/chromium-1243`
+与 `~/chrome-libs` 并设置 `LD_LIBRARY_PATH`，也可用环境变量 `PLAYWRIGHT_CHROME` 指定浏览器路径。
 
 ## 功能说明
 
@@ -87,6 +93,7 @@ src/
     EncounterDetail.tsx    # 记录详情与单条导出
     AudiogramChart.tsx     # SVG 听力图
 test/
-  smoke.tsx                # jsdom 端到端冒烟测试
-  setup-dom.ts             # 测试环境（jsdom/CSS stub）
+  smoke.tsx                # jsdom 场景隔离测试（单元 + 集成）
+  browser.e2e.ts           # Playwright 真实浏览器端到端验证
+  setup-dom.ts             # jsdom 测试环境（DOM 全局/CSS stub）
 ```
