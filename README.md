@@ -11,26 +11,46 @@ React 19 + Vite 7 + TypeScript + 原生 CSS
 ## 本地运行
 
 ```bash
-npm install          # 如官方 registry 慢，可加 --registry=https://registry.npmmirror.com
+npm install
 npm run dev
 ```
 
 打开 http://localhost:5101 即可使用（首次进入自带 3 位演示患者与 3 条验配记录）。
+项目 `.npmrc` 已固定 `legacy-peer-deps` 等选项，直接 `npm install` 即可，无需额外参数。
 
-其他命令：
+## 脚本
 
 ```bash
+npm run dev            # 开发服务器（5101）
 npm run build          # 生产构建到 dist/
-npm run preview        # 本地预览生产构建（同为 5101 端口）
-npm run typecheck      # TypeScript 类型检查
+npm run preview        # 本地预览生产构建（5101）
+npm run typecheck      # 类型检查（源码 src + 测试 test + 脚本 scripts）
 npm test               # jsdom 场景隔离测试（62 个断言，0 个 act 警告）
-npm run test:browser   # Playwright 真实 Chromium 端到端验证（自动起 dev server，17 个断言）
+npm run setup:browser  # 一键准备真实浏览器（幂等，详见下节）
+npm run test:browser   # Playwright 真实 Chromium 端到端验证（自动先跑 setup，17 个断言）
+npm run verify         # 一条命令串行执行 typecheck + test + test:browser + build
 ```
 
-真实浏览器测试说明：`test:browser` 使用 Playwright，会自动在 5199 端口拉起 Vite。
-常规环境先执行一次 `npx playwright install chromium` 即可；本机（无 root 的 arm64 容器）
-则把 Chromium 与依赖库装在用户目录，测试脚本会自动探测 `~/.cache/ms-playwright/chromium-1243`
-与 `~/chrome-libs` 并设置 `LD_LIBRARY_PATH`，也可用环境变量 `PLAYWRIGHT_CHROME` 指定浏览器路径。
+## 真实浏览器测试环境（无需 root，自动准备）
+
+`npm run test:browser` 会通过 `pretest:browser` 钩子自动执行 `scripts/setup-browser.ts`，
+该脚本幂等，已完成的步骤自动跳过：
+
+1. 从 `playwright-core` 解析当前锁定的 Chromium 版本，下载完整浏览器并解压到
+   `~/.cache/ms-playwright/chromium-<rev>`；官方源失败时自动回退国内镜像
+   （`cdn.npmmirror.com` / `registry.npmmirror.com`）。
+2. 用 `ldd` 检测缺失的系统库，按 Debian bookworm 的 arm64/amd64 软件包索引下载对应
+   `.deb`，解包到 `~/chrome-libs`，循环到依赖闭环（本机两轮即可）。
+3. 写出 `~/chrome-libs/.ldpath`；运行测试时只把它注入浏览器子进程的
+   `LD_LIBRARY_PATH`，不影响全局环境，也不需要 root / apt。
+
+浏览器与库都在用户主目录，因此**不需要** `npx playwright install` 或系统级安装。
+可用环境变量覆盖下载源或版本：`PLAYWRIGHT_DOWNLOAD_HOST`（逗号分隔多个源）、
+`DEBIAN_MIRROR`、`PLAYWRIGHT_CHROME_REV`。若 ldd 报出映射表之外的新依赖，脚本会直接
+报错并提示在 `scripts/setup-browser.ts` 的 `CURATED_SONAME_PKG` 中补充包名。
+
+> 在已具备 Chromium 运行库的常规桌面/CI 环境，setup 第 2 步会检测到依赖齐全而跳过。
+> dev server 由测试脚本在 5199 端口自动拉起、结束时按进程组回收。
 
 ## 功能说明
 
@@ -95,5 +115,9 @@ src/
 test/
   smoke.tsx                # jsdom 场景隔离测试（单元 + 集成）
   browser.e2e.ts           # Playwright 真实浏览器端到端验证
+  browser-env.ts           # 浏览器可执行文件与库路径的共享解析
   setup-dom.ts             # jsdom 测试环境（DOM 全局/CSS stub）
+scripts/
+  setup-browser.ts         # 一键下载 Chromium + 无 root 补齐系统依赖库（幂等）
+tsconfig.test.json         # 含 test/scripts 的类型检查配置
 ```

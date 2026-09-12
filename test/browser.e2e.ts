@@ -5,11 +5,11 @@
  *  B. 单条 Markdown 摘要：测听表（含骨导行）与表头 7 列对齐
  *  C. 空言语识别率：单条显示 — 而非 —%；批量显示 80%/—
  */
-import { spawn, execSync, type ChildProcess } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
-import os from "node:os";
+import { spawn, type ChildProcess } from "node:child_process";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { chromium, type Browser, type Page } from "playwright";
+import { browserReady, chromiumExecutable, ldLibraryPath } from "./browser-env";
 
 const PORT = 5199;
 const BASE = `http://localhost:${PORT}`;
@@ -18,21 +18,6 @@ function check(cond: boolean, msg: string) {
   if (!cond) throw new Error(`断言失败：${msg}`);
   passed += 1;
   console.log(`  ✓ ${msg}`);
-}
-
-// --- 本机无 root 安装的 Chromium 及其依赖库（如不存在则回退到 Playwright 默认查找） ---
-const chromePath =
-  process.env.PLAYWRIGHT_CHROME ||
-  path.join(os.homedir(), ".cache/ms-playwright/chromium-1243/chrome-linux/chrome");
-const localLibRoot = path.join(os.homedir(), "chrome-libs/root");
-
-function collectLibPath(): string {
-  const dirs = execSync(`find ${localLibRoot} -name '*.so*' -exec dirname {} \\; | sort -u`)
-    .toString()
-    .trim()
-    .split("\n")
-    .filter(Boolean);
-  return dirs.join(":");
 }
 
 async function waitForServer(url: string, timeoutMs = 30000): Promise<void> {
@@ -197,9 +182,11 @@ async function scenarioExport(page: Page) {
 }
 
 async function main() {
-  if (existsSync(localLibRoot)) {
-    process.env.LD_LIBRARY_PATH = [collectLibPath(), process.env.LD_LIBRARY_PATH].filter(Boolean).join(":");
+  if (!browserReady()) {
+    throw new Error("浏览器尚未安装，请先运行：npm run setup:browser");
   }
+  // 无 root 容器中库装在用户目录：仅注入给浏览器子进程，不改全局环境
+  const ldPath = ldLibraryPath();
   const srv = startServer();
   let browser: Browser | undefined;
   try {
@@ -208,8 +195,9 @@ async function main() {
 
     browser = await chromium.launch({
       headless: true,
-      ...(existsSync(chromePath) ? { executablePath: chromePath } : {}),
+      executablePath: chromiumExecutable(),
       args: ["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"],
+      env: ldPath ? { ...process.env, LD_LIBRARY_PATH: ldPath } : process.env,
     });
     const context = await browser.newContext({ acceptDownloads: true });
     const page = await context.newPage();

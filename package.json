@@ -4,8 +4,11 @@
     "build": "vite build",
     "preview": "vite preview --host 0.0.0.0 --port 5101",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json",
+    "setup:browser": "tsx scripts/setup-browser.ts",
     "test": "tsx test/smoke.tsx",
-    "test:browser": "tsx test/browser.e2e.ts"
+    "pretest:browser": "tsx scripts/setup-browser.ts",
+    "test:browser": "tsx test/browser.e2e.ts",
+    "verify": "npm run typecheck && npm run test && npm run test:browser && npm run build"
   },
   "dependencies": {
     "@vitejs/plugin-react": "^5.0.0",
