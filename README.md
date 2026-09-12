@@ -40,14 +40,48 @@ npm run verify         # 一条命令串行执行 typecheck + test + test:browse
    `~/.cache/ms-playwright/chromium-<rev>`；官方源失败时自动回退国内镜像
    （`cdn.npmmirror.com` / `registry.npmmirror.com`）。
 2. 用 `ldd` 检测缺失的系统库，按 Debian bookworm 的 arm64/amd64 软件包索引下载对应
-   `.deb`，解包到 `~/chrome-libs`，循环到依赖闭环（本机两轮即可）。
+   `.deb`，解包到 `~/chrome-libs/root`，循环到依赖闭环（本机两轮即可）。
 3. 写出 `~/chrome-libs/.ldpath`；运行测试时只把它注入浏览器子进程的
    `LD_LIBRARY_PATH`，不影响全局环境，也不需要 root / apt。
+4. 结束前真实 headless 启动一次浏览器做自检。
 
 浏览器与库都在用户主目录，因此**不需要** `npx playwright install` 或系统级安装。
-可用环境变量覆盖下载源或版本：`PLAYWRIGHT_DOWNLOAD_HOST`（逗号分隔多个源）、
-`DEBIAN_MIRROR`、`PLAYWRIGHT_CHROME_REV`。若 ldd 报出映射表之外的新依赖，脚本会直接
-报错并提示在 `scripts/setup-browser.ts` 的 `CURATED_SONAME_PKG` 中补充包名。
+
+### 离线缓存与复用
+
+所有下载物都保留在缓存目录 `~/chrome-libs/cache`（约 210 MB），**默认优先命中缓存**，
+已下载的 Chromium 安装包、Debian 索引、`.deb` 可反复复用、支持离线：
+
+```bash
+# 有网环境预热一次（填充缓存）
+npm run setup:browser
+
+# 之后即使断网也可执行（0 次联网，仅解包缓存）
+OFFLINE=1 npm run setup:browser
+OFFLINE=1 npm run test:browser
+```
+
+离线但缺少某项缓存时，脚本会明确指出缺的文件与缓存路径，并提示先在有网环境预热。
+跨机器离线时，拷贝 `~/chrome-libs/cache` 与 `~/.cache/ms-playwright` 即可；缓存目录
+可用 `HXWL_BROWSER_CACHE` 改到其他位置。
+
+### 环境变量与失败提示
+
+| 变量 | 作用 |
+| --- | --- |
+| `OFFLINE=1` | 纯离线，只使用缓存、绝不联网 |
+| `PLAYWRIGHT_CHROME=/path/to/chrome` | 直接用系统浏览器（非 Linux / 非 Debian 推荐） |
+| `HXWL_BROWSER_CACHE` | 离线缓存目录（默认 `~/chrome-libs/cache`） |
+| `HXWL_CHROME_LIB_ROOT` | 解包库根目录（默认 `~/chrome-libs/root`） |
+| `HXWL_FORCE_DEB=1` | 非 Debian 系 Linux 也强制用 bookworm `.deb` 解包 |
+| `PLAYWRIGHT_DOWNLOAD_HOST` | 额外/优先的 Chromium 下载源（逗号分隔多个） |
+| `DEBIAN_MIRROR` | Debian 源镜像（默认 `deb.debian.org`） |
+
+脚本在以下情况会退出码 1 并给出可操作的安装指引：缺少 `curl/unzip/dpkg-deb/ldd`；
+非 Debian 系（按 Fedora / Arch / Alpine 分别给出 `dnf/pacman/apk` 命令或
+`PLAYWRIGHT_CHROME` 方案）；所有下载源失败且无缓存；遇到映射表之外的新 soname；
+浏览器下载后启动自检失败。新增系统依赖时，在 `scripts/setup-browser.ts` 的
+`CURATED_SONAME_PKG` 中补充 soname → Debian 包名即可。
 
 > 在已具备 Chromium 运行库的常规桌面/CI 环境，setup 第 2 步会检测到依赖齐全而跳过。
 > dev server 由测试脚本在 5199 端口自动拉起、结束时按进程组回收。

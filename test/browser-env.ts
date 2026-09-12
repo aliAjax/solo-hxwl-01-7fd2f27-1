@@ -1,6 +1,11 @@
 /**
  * 真实浏览器测试的环境路径（由 setup 脚本与测试运行器共享）。
  * 浏览器与其系统依赖库一律装在用户目录，无需 root。
+ *
+ * 可覆盖的环境变量：
+ *   PLAYWRIGHT_CHROME        直接指定浏览器可执行文件（如系统 Chromium），指定后跳过自动下载
+ *   HXWL_BROWSER_CACHE       离线缓存目录（zip / Packages 索引 / .deb），默认 ~/chrome-libs/cache
+ *   HXWL_CHROME_LIB_ROOT     解包后的系统库根目录，默认 ~/chrome-libs/root
  */
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -38,15 +43,26 @@ export function chromiumRevision(): string {
   return c.revision;
 }
 
-export const PLAYWRIGHT_BROWSERS = path.join(os.homedir(), ".cache/ms-playwright");
+export const PLAYWRIGHT_BROWSERS =
+  process.env.PLAYWRIGHT_BROWSERS_PATH?.trim() ||
+  path.join(os.homedir(), ".cache/ms-playwright");
 export const browserDir = (rev = chromiumRevision()) =>
   path.join(PLAYWRIGHT_BROWSERS, `chromium-${rev}`);
-export const chromiumExecutable = (rev = chromiumRevision()) =>
+const managedExecutable = (rev = chromiumRevision()) =>
   path.join(browserDir(rev), "chrome-linux", "chrome");
 
-/** 无 root 时解包的系统依赖库根目录与 LD_LIBRARY_PATH 清单文件 */
-export const LOCAL_LIB_ROOT = path.join(os.homedir(), "chrome-libs", "root");
-export const LDPATH_FILE = path.join(os.homedir(), "chrome-libs", ".ldpath");
+/** 实际使用的浏览器可执行文件：PLAYWRIGHT_CHROME 优先，否则为脚本下载的受管副本 */
+export const chromiumExecutable = (rev = chromiumRevision()) =>
+  process.env.PLAYWRIGHT_CHROME?.trim() || managedExecutable(rev);
+
+export const isCustomChrome = (): boolean => !!process.env.PLAYWRIGHT_CHROME?.trim();
+
+/** 离线缓存与解包库根目录 */
+export const CACHE_DIR =
+  process.env.HXWL_BROWSER_CACHE?.trim() || path.join(os.homedir(), "chrome-libs", "cache");
+export const LOCAL_LIB_ROOT =
+  process.env.HXWL_CHROME_LIB_ROOT?.trim() || path.join(os.homedir(), "chrome-libs", "root");
+export const LDPATH_FILE = path.join(path.dirname(LOCAL_LIB_ROOT), ".ldpath");
 
 /** 递归收集所有含 .so 的目录 */
 export function collectSoDirs(root: string): string[] {
